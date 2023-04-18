@@ -372,10 +372,22 @@ resource "aws_apigatewayv2_integration" "apigw_lambda" {
   integration_type   = "AWS_PROXY"
   integration_method = "POST"
 }
-resource "aws_apigatewayv2_route" "post" {
+resource "aws_apigatewayv2_route" "get" {
   api_id = aws_apigatewayv2_api.lambda.id
 
-  route_key = "POST /count"
+  route_key = "GET /count"
+  target    = "integrations/${aws_apigatewayv2_integration.apigw_lambda.id}"
+}
+resource "aws_apigatewayv2_route" "put" {
+  api_id = aws_apigatewayv2_api.lambda.id
+
+  route_key = "PUT /count"
+  target    = "integrations/${aws_apigatewayv2_integration.apigw_lambda.id}"
+}
+resource "aws_apigatewayv2_route" "options" {
+  api_id = aws_apigatewayv2_api.lambda.id
+
+  route_key = "OPTIONS /count"
   target    = "integrations/${aws_apigatewayv2_integration.apigw_lambda.id}"
 }
 resource "aws_cloudwatch_log_group" "api_gw" {
