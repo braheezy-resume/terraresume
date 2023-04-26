@@ -74,23 +74,23 @@ resource "aws_s3_bucket_policy" "main" {
 }
 POLICY
 }
-# Require for static website
+# Required for static website
 resource "aws_s3_bucket_website_configuration" "main" {
   bucket = aws_s3_bucket.main.id
 
   index_document {
-    suffix = "resume.html"
+    suffix = var.resume_html_file
   }
 }
 # Download the latest resume, for upload
 # This is only for the first deployment, not how every resume update is deployed
 data "http" "resume" {
-  url = "https://github.com/braheezy-resume/resume/releases/latest/download/resume.html"
+  url = var.resume_html_file_url
 }
 # Upload resume to bucket
 resource "aws_s3_object" "object" {
   bucket  = aws_s3_bucket.main.bucket
-  key     = "resume.html"
+  key     = var.resume_html_file
   content = data.http.resume.response_body
   # Needed so the page renders in browser instead of downloading
   content_type = "text/html"
@@ -105,6 +105,7 @@ resource "aws_s3_object" "object" {
 # Ask ACM for a certficate, enabling HTTPS with CloudFront
 # Can't use the builtin CloudFront cert b/c of custom domain
 resource "aws_acm_certificate" "main" {
+  # ACM Cert for CloudFront must be us-east-1
   provider          = aws.us-east-1
   domain_name       = var.domain
   validation_method = "DNS"
@@ -135,7 +136,7 @@ resource "aws_route53_zone" "main" {
   name = var.domain
 }
 # Create all the records required to validate we own the domain
-# for the certs we just required from ACM
+# for the certs we just requested from ACM
 resource "aws_route53_record" "dns_validation" {
   for_each = {
     for dvo in aws_acm_certificate.main.domain_validation_options : dvo.domain_name => {
@@ -166,9 +167,9 @@ resource "aws_cloudfront_distribution" "main" {
 
   enabled             = true
   is_ipv6_enabled     = true
-  default_root_object = "resume.html"
+  default_root_object = var.resume_html_file
 
-  #* The friendly name to show instead of the auto-generated cloudfront name
+  # The friendly name to show instead of the auto-generated cloudfront name
   aliases = [aws_s3_bucket.main.id]
 
   default_cache_behavior {
@@ -188,16 +189,16 @@ resource "aws_cloudfront_distribution" "main" {
       locations        = []
     }
   }
-  #* Use our custom SSL cert b/c of custom domain name
+  # Use our custom SSL cert b/c of custom domain name
   viewer_certificate {
     acm_certificate_arn = aws_acm_certificate.main.arn
     ssl_support_method  = "sni-only"
   }
 }
-# Create alias record to route requests CloudFront name
+# Create alias record to route requests from our domain to CloudFront auto-generated name
 resource "aws_route53_record" "a" {
   zone_id = aws_route53_zone.main.zone_id
-  name    = "resume.${var.domain}"
+  name    = var.resume_website
   type    = "A"
 
   alias {
@@ -211,25 +212,29 @@ resource "aws_route53_record" "a" {
 * DynamoDB
 *
 */
+# Define the table to hold our website stats
 resource "aws_dynamodb_table" "main" {
-  name           = "site-analytics"
+  name           = var.db_table_name
   read_capacity  = 5
   write_capacity = 5
-  hash_key       = "metrics"
+  # The partition key
+  hash_key = var.db_partition_key
 
   attribute {
-    name = "metrics"
+    name = var.db_partition_key
     type = "S"
   }
 }
+# Define initial table items
 resource "aws_dynamodb_table_item" "init" {
   table_name = aws_dynamodb_table.main.name
   hash_key   = aws_dynamodb_table.main.hash_key
 
+  # The value of metrics doens't really matter for our use case right now
   item = <<ITEM
 {
-  "metrics": {"S": "resume.${var.domain}"},
-  "visitorCount": {"N": "0"}
+  "${var.db_partition_key}": {"S": "${var.resume_website}"},
+  "${var.db_count_attribute_name}": {"N": "0"}
 }
 ITEM
 }
@@ -238,14 +243,15 @@ ITEM
 * Lambda
 *
 */
-resource "aws_s3_bucket" "lambda_bucket" {
-  bucket_prefix = "resume-lambda"
-  force_destroy = true
-}
-resource "aws_s3_bucket_acl" "private_bucket" {
-  bucket = aws_s3_bucket.lambda_bucket.id
-  acl    = "private"
-}
+# resource "aws_s3_bucket" "lambda_bucket" {
+#   bucket_prefix = "resume-lambda"
+#   force_destroy = true
+# }
+# resource "aws_s3_bucket_acl" "private_bucket" {
+#   bucket = aws_s3_bucket.lambda_bucket.id
+#   acl    = "private"
+# }
+# Define the IAM role and policy to allow Lambda access to DynamoDB
 resource "aws_iam_role" "lambda_exec_role" {
   name = "lambdaDBAccess"
 
@@ -290,11 +296,13 @@ resource "aws_iam_policy" "lambda_exec" {
     ]
   })
 }
+# Attach the policy doc to the role
 resource "aws_iam_role_policy_attachment" "lambda_policy" {
   role       = aws_iam_role.lambda_exec_role.name
   policy_arn = aws_iam_policy.lambda_exec.arn
 }
-
+# Deploying a Lambda function requires some code. This is a dummy upload that is
+# replaced later with GitHub actions deploying the actual code
 data "archive_file" "lambda_zip" {
   type        = "zip"
   output_path = "${path.module}/src.zip"
@@ -304,6 +312,7 @@ data "archive_file" "lambda_zip" {
     filename = "dummy"
   }
 }
+# Define the Lambda function and runtime
 resource "aws_lambda_function" "count" {
   function_name = "count"
   description   = "Handle logic to get/update visitor count to resume.${var.domain}"
@@ -311,7 +320,8 @@ resource "aws_lambda_function" "count" {
   filename = data.archive_file.lambda_zip.output_path
 
   runtime = "go1.x"
-  handler = "count"
+  # The handler for Go runtimes is the name of the program Lambda should call
+  handler = var.lambda_handler_name
 
   role = aws_iam_role.lambda_exec_role.arn
 
@@ -323,24 +333,28 @@ resource "aws_lambda_function" "count" {
   depends_on = [aws_cloudwatch_log_group.lambda_logs]
 
 }
+# Create a dedicated HTTP endpoint for the Lambda function
 resource "aws_lambda_function_url" "count" {
   function_name      = aws_lambda_function.count.function_name
   authorization_type = "AWS_IAM"
 }
+# Set up cloudwatch logging for the lambda function
 resource "aws_cloudwatch_log_group" "lambda_logs" {
-  name = "/aws/lambda/resume-analytics"
+  name = "/aws/lambda/${aws_lambda_function.count.function_name}"
 
-  retention_in_days = 7
+  retention_in_days = var.cloudwatch_retention_days
 }
 /*
 *
 * API Gateway
 *
 */
+# Declare the AWS API Gateway HTTP that will serve requests to the Lambda function
 resource "aws_apigatewayv2_api" "lambda" {
   name          = "resume-api"
   protocol_type = "HTTP"
 }
+# Definet the default deployment of the API
 resource "aws_apigatewayv2_stage" "default" {
   api_id      = aws_apigatewayv2_api.lambda.id
   name        = "$default"
@@ -365,6 +379,7 @@ resource "aws_apigatewayv2_stage" "default" {
   }
   depends_on = [aws_cloudwatch_log_group.api_gw]
 }
+# Integrate the API with the Lambda function
 resource "aws_apigatewayv2_integration" "apigw_lambda" {
   api_id = aws_apigatewayv2_api.lambda.id
 
@@ -372,6 +387,7 @@ resource "aws_apigatewayv2_integration" "apigw_lambda" {
   integration_type   = "AWS_PROXY"
   integration_method = "POST"
 }
+# Define the /count route our API serves and the supported methods: GET, PUT, and OPTIONS
 resource "aws_apigatewayv2_route" "get" {
   api_id = aws_apigatewayv2_api.lambda.id
 
@@ -390,12 +406,13 @@ resource "aws_apigatewayv2_route" "options" {
   route_key = "OPTIONS /count"
   target    = "integrations/${aws_apigatewayv2_integration.apigw_lambda.id}"
 }
+# Catch API Gateway logs in Cloudwatch
 resource "aws_cloudwatch_log_group" "api_gw" {
-  name = "/aws/api_gw/resume-api"
+  name = "/aws/api_gw/${aws_apigatewayv2_api.lambda.name}"
 
-  retention_in_days = 7
+  retention_in_days = var.cloudwatch_retention_days
 }
-
+# Give the API Gateway permission to call the Lambda function
 resource "aws_lambda_permission" "api_gw" {
   statement_id  = "AllowExecutionFromAPIGateway"
   action        = "lambda:InvokeFunction"
