@@ -243,14 +243,6 @@ ITEM
 * Lambda
 *
 */
-# resource "aws_s3_bucket" "lambda_bucket" {
-#   bucket_prefix = "resume-lambda"
-#   force_destroy = true
-# }
-# resource "aws_s3_bucket_acl" "private_bucket" {
-#   bucket = aws_s3_bucket.lambda_bucket.id
-#   acl    = "private"
-# }
 # Define the IAM role and policy to allow Lambda access to DynamoDB
 resource "aws_iam_role" "lambda_exec_role" {
   name = "lambdaDBAccess"
